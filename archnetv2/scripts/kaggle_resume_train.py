@@ -147,7 +147,9 @@ def main() -> None:
         model.train(
             epochs=args.epochs, batch=args.batch, patience=args.patience,
             time=args.time_budget,
-            fliplr=0.5, flipud=0.0, degrees=0.0, translate=0.1, scale=0.5,
+            # Floor plans have no canonical orientation -> flip both axes.
+            # Color jitter is off (line art); keep geometric aug + mosaic.
+            fliplr=0.5, flipud=0.5, degrees=0.0, translate=0.1, scale=0.5,
             mosaic=1.0, close_mosaic=10, hsv_h=0.0, hsv_s=0.0, hsv_v=0.1,
             **common,
         )
