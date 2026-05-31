@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Training artifacts / weights
+runs/
+*.pt
+!**/cfg/*.yaml
+wandb/
+
+# Datasets (never commit the data)
+cubicasa5k*/
+*_yolo/
+datasets/
+
+# OS
+.DS_Store

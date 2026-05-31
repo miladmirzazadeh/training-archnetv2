@@ -1,0 +1,56 @@
+# ArchNetv2 — Xu et al., Automation in Construction 165 (2024) 105486
+# Architecture matches Fig. 4 of the paper. The four C2f modules at
+# indices 18, 21, 24, 27 are post-process replaced with AC_CBAM by
+# archnetv2/model.py:build_archnetv2().
+
+nc: 2  # 0=door, 1=window  (openings-only variant of ArchNetv2)
+
+scales:
+  l: [1.00, 1.00, 512]  # paper uses YOLOv8l-scale (depth, width, max_channels)
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv,  [64, 3, 2]]    # 0  P1/2
+  - [-1, 1, Conv,  [128, 3, 2]]   # 1  P2/4
+  - [-1, 3, C2f,   [128, True]]   # 2  B3  -> 160x160x128
+  - [-1, 1, Conv,  [256, 3, 2]]   # 3  P3/8
+  - [-1, 6, C2f,   [256, True]]   # 4  B5  -> 80x80x256
+  - [-1, 1, Conv,  [512, 3, 2]]   # 5  P4/16
+  - [-1, 6, C2f,   [512, True]]   # 6  B7  -> 40x40x512
+  - [-1, 1, Conv,  [1024, 3, 2]]  # 7  P5/32
+  - [-1, 3, C2f,   [1024, True]]  # 8
+  - [-1, 1, SPPF,  [1024, 5]]     # 9  B10 -> 20x20x512
+
+head:
+  # Stage 1 (paper): up(B10) + B7 -> C2f(1024,512)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 10
+  - [[-1, 6], 1, Concat, [1]]                    # 11  cat B7
+  - [-1, 3, C2f, [512]]                          # 12  Stage1 out (n1)
+
+  # Stage 2: up(n1) + B5 -> C2f(768,256)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 13
+  - [[-1, 4], 1, Concat, [1]]                    # 14  cat B5
+  - [-1, 3, C2f, [256]]                          # 15  Stage2 out (n2)
+
+  # Stage 3 (AC-CBAM): up(n2) + B3 -> AC_CBAM(384,128)  --> head N3 (stride 4)
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]   # 16
+  - [[-1, 2], 1, Concat, [1]]                    # 17  cat B3
+  - [-1, 3, C2f, [128]]                          # 18  N3 — replaced with AC_CBAM(384,128)
+
+  # Stage 4 (AC-CBAM): conv(N3) + n2 -> AC_CBAM(384,256)  --> head N4 (stride 8)
+  - [-1, 1, Conv, [128, 3, 2]]                   # 19
+  - [[-1, 15], 1, Concat, [1]]                   # 20  cat stage2
+  - [-1, 3, C2f, [256]]                          # 21  N4 — replaced with AC_CBAM(384,256)
+
+  # Stage 5 (AC-CBAM): conv(N4) + n1 -> AC_CBAM(768,512)  --> head N5 (stride 16)
+  - [-1, 1, Conv, [256, 3, 2]]                   # 22
+  - [[-1, 12], 1, Concat, [1]]                   # 23  cat stage1
+  - [-1, 3, C2f, [512]]                          # 24  N5 — replaced with AC_CBAM(768,512)
+
+  # Stage 6 (AC-CBAM): conv(N5) + B10 -> AC_CBAM(1024,512)  --> head N6 (stride 32)
+  - [-1, 1, Conv, [512, 3, 2]]                   # 25
+  - [[-1, 9], 1, Concat, [1]]                    # 26  cat SPPF
+  - [-1, 3, C2f, [512]]                          # 27  N6 — replaced with AC_CBAM(1024,512)
+
+  # 4-head Detect at strides 4, 8, 16, 32
+  - [[18, 21, 24, 27], 1, Detect, [nc]]          # 28
