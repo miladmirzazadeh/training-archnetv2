@@ -1,4 +1,4 @@
-# floorplan-openings-detector
+# training-archnetv2
 
 A faithful reimplementation of **ArchNetv2** — the multiscale floor-plan
 object detector from:
