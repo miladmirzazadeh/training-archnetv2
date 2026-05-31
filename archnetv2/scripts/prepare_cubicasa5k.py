@@ -127,6 +127,9 @@ def to_yolo(box, w: int, h: int) -> str:
     return f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}"
 
 
+ALL_QUALITY = ("high_quality", "colorful", "high_quality_architectural")
+
+
 def split_ids(src: Path, split: str) -> list[str]:
     """CubiCasa5K ships train.txt / val.txt / test.txt at the repo root."""
     txt = src / f"{split}.txt"
@@ -138,6 +141,29 @@ def split_ids(src: Path, split: str) -> list[str]:
         if line:
             ids.append(line)
     return ids
+
+
+def resolve_plan_dir(src: Path, plan_id: str, quality_dirs) -> Path | None:
+    """Locate a plan's folder, robust to two CubiCasa5K layouts.
+
+    CubiCasa5K's split files normally store the *full* relative path
+    including the quality folder (e.g. ``high_quality_architectural/2003``),
+    but some mirrors store only the bare numeric id. Handle both, while
+    still respecting the ``--quality`` filter.
+    """
+    parts = plan_id.split("/")
+    # Case 1: plan_id already starts with a known quality folder.
+    if parts and parts[0] in ALL_QUALITY:
+        if parts[0] not in quality_dirs:
+            return None  # filtered out by --quality
+        cand = src / plan_id
+        return cand if (cand / "F1_scaled.png").exists() else None
+    # Case 2: bare id — try each selected quality folder.
+    for q in quality_dirs:
+        cand = src / q / plan_id
+        if (cand / "F1_scaled.png").exists():
+            return cand
+    return None
 
 
 def convert(src: Path, dst: Path, quality: str, limit: int | None,
@@ -155,11 +181,10 @@ def convert(src: Path, dst: Path, quality: str, limit: int | None,
         if limit:
             ids = ids[:limit]
         for plan_id in ids:
-            qd = next((q for q in quality_dirs if (src / q / plan_id).exists()), None)
-            if qd is None:
+            plan_dir = resolve_plan_dir(src, plan_id, quality_dirs)
+            if plan_dir is None:
                 stats[split]["skipped"] += 1
                 continue
-            plan_dir = src / qd / plan_id
             png = plan_dir / "F1_scaled.png"
             svg = plan_dir / "model.svg"
             if not (png.exists() and svg.exists()):
@@ -211,6 +236,24 @@ def convert(src: Path, dst: Path, quality: str, limit: int | None,
         print(f"  {s:5s}: {st['plans']:5d} plans, {st['boxes']:6d} boxes,"
               f" {st['skipped']:4d} skipped")
     print(f"\nDataset config: {dst/'data.yaml'}")
+
+    total_plans = sum(stats[s]["plans"] for s in splits)
+    if total_plans == 0:
+        # Show what actually sits under src so the layout can be diagnosed.
+        sample = []
+        for p in sorted(src.iterdir()) if src.is_dir() else []:
+            sample.append(p.name + ("/" if p.is_dir() else ""))
+        print(
+            "\nERROR: 0 plans converted — the dataset layout under\n"
+            f"  {src}\n"
+            "did not match. Top-level entries there:\n"
+            f"  {sample[:15]}\n"
+            "Expected quality folders (high_quality / colorful / "
+            "high_quality_architectural) each containing <id>/F1_scaled.png "
+            "and <id>/model.svg, plus train.txt/val.txt/test.txt.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def main() -> None:
