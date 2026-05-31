@@ -20,12 +20,28 @@ The model is a YOLOv8l backbone with **4 detection heads** (strides
 [`archnetv2/README.md`](archnetv2/README.md) for the full architecture
 breakdown, training instructions, and the Kaggle auto-resume workflow.
 
+## Two tracks
+
+| Track | Task | Model | Data |
+|---|---|---|---|
+| **Openings** (`archnetv2/`) | door + window **detection** | ArchNetv2 (4-head YOLOv8 + AC-CBAM) | CubiCasa5K + FloorPlanCAD-YOLO |
+| **Walls** (`wallseg/`) | wall **segmentation** | UNet (segmentation-models-pytorch) | FloorPlanCAD SVG release |
+
+Walls are a separate task because bounding boxes can't represent wall
+geometry — the ArchNetv2 paper itself excludes walls and points to
+segmentation. Both tracks share the same PDF/PNG inference contract and
+the same Kaggle auto-resume background-training pattern.
+
 ## Quick links
 
-- **Architecture + full docs:** [`archnetv2/README.md`](archnetv2/README.md)
-- **Kaggle background training (recommended):** [`archnetv2/notebooks/archnetv2_kaggle.ipynb`](archnetv2/notebooks/archnetv2_kaggle.ipynb)
-- **Colab training:** [`archnetv2/notebooks/archnetv2_colab.ipynb`](archnetv2/notebooks/archnetv2_colab.ipynb)
-- **Inference (PNG/PDF):** `python -m archnetv2.predict --weights best.pt --source plan.pdf`
+**Openings (doors/windows):**
+- Architecture + full docs: [`archnetv2/README.md`](archnetv2/README.md)
+- Kaggle background training: [`archnetv2/notebooks/archnetv2_kaggle.ipynb`](archnetv2/notebooks/archnetv2_kaggle.ipynb)
+- Inference (PNG/PDF): `python -m archnetv2.predict --weights best.pt --source plan.pdf`
+
+**Walls (segmentation):**
+- Kaggle background training: [`wallseg/notebooks/wallseg_kaggle.ipynb`](wallseg/notebooks/wallseg_kaggle.ipynb)
+- Inference (PNG/PDF): `python -m wallseg.predict --weights best.pt --source plan.pdf`
 
 ## License
 
