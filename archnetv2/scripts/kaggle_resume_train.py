@@ -121,8 +121,13 @@ def main() -> None:
     ap.add_argument("--patience", type=int, default=100)
     ap.add_argument("--time-budget", type=float, default=11.0,
                     help="Max wall-clock hours for THIS session (<12 on Kaggle).")
-    ap.add_argument("--device", default="0")
-    ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--device", default="0",
+                    help="GPU id(s). Use '0,1' for both T4s (~2x faster).")
+    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--cache", default=None,
+                    help="'ram' or 'disk' to cache images (faster data loading).")
+    ap.add_argument("--fraction", type=float, default=1.0,
+                    help="Fraction of the training set to use (e.g. 0.5 = 2x faster).")
     ap.add_argument("--project", default="/kaggle/working/runs/archnetv2")
     ap.add_argument("--name", default="archnetv2_openings")
     ap.add_argument("--ckpt-dataset", default=None,
@@ -142,6 +147,7 @@ def main() -> None:
         data=str(args.data), imgsz=args.imgsz, device=args.device,
         workers=args.workers, project=str(project), name=args.name,
         save=True, plots=True, exist_ok=True,
+        cache=args.cache if args.cache else False, fraction=args.fraction,
     )
     if last_pt.exists():
         from ultralytics import YOLO
