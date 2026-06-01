@@ -89,13 +89,27 @@ def upload_checkpoint(ckpt_dataset: str | None, run_dir: Path) -> None:
         '  "licenses": [{"name": "CC0-1.0"}]\n'
         '}\n'
     )
-    # `version` if it already exists, else `create`.
-    rc = _run(["kaggle", "datasets", "version", "-p", str(staging),
-               "-m", "auto-resume checkpoint", "--dir-mode", "zip"])
-    if rc != 0:
-        print("[ckpt] version failed (dataset may not exist yet); trying create.")
-        _run(["kaggle", "datasets", "create", "-p", str(staging),
-              "--dir-mode", "zip"])
+    # staging now holds run.zip (a file) + metadata, so the DEFAULT dir-mode
+    # ("skip") uploads them directly. `--dir-mode zip` was the bug: it tries
+    # to re-zip subdirs and failed silently, leaving the dataset un-updated.
+    # Capture output so any failure is visible (and note the Output fallback).
+    def _push(action: str) -> int:
+        cmd = ["kaggle", "datasets", action, "-p", str(staging)]
+        if action == "version":
+            cmd += ["-m", "auto-resume checkpoint"]
+        print("+", " ".join(cmd))
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        print(res.stdout.strip())
+        if res.returncode != 0:
+            print("[ckpt] STDERR:", res.stderr.strip())
+        return res.returncode
+
+    if _push("version") != 0:
+        print("[ckpt] version failed; trying create.")
+        if _push("create") != 0:
+            print("[ckpt] Upload failed — but run.zip is preserved in the "
+                  "notebook Output at", archive, "(download it from the "
+                  "Output tab as a fallback).")
 
 
 def main() -> None:
