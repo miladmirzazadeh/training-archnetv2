@@ -103,19 +103,17 @@ def convert_one(cfg: dict, rich: dict, W: int, H: int, line_frac: float,
                 best, bt = dd, float(w.get("thickness_mm", 150.0))
         return bt
 
-    # Openings over walls — draw the OPENING FOOTPRINT (the p1..p2 span along
-    # the wall, thickened to the host wall thickness). This sits inside the wall
-    # gap (tight + accurate), not the swung leaf.
+    # Openings over walls — the wall-gap footprint (p1..p2 span thickened to the
+    # host wall thickness) for both doors and windows. Sits tight in the wall.
     for o in cfg.get("openings", []):
         cat = (o.get("category") or o.get("type") or "").lower()
         cls = WINDOW if "window" in cat else DOOR
         p1, p2 = o.get("p1"), o.get("p2")
         if not (p1 and p2):
             continue
-        a, b = to_px(A, [p1, p2])
-        thick_mm = nearest_wall_thickness_mm(o.get("center", p1))
-        width = max(3, int(round(thick_mm * ppm)))
-        d.line([tuple(a), tuple(b)], fill=cls, width=width)
+        (j1, j2) = to_px(A, [p1, p2])
+        thick_px = max(3, int(round(nearest_wall_thickness_mm(o.get("center", p1)) * ppm)))
+        d.line([tuple(j1), tuple(j2)], fill=cls, width=thick_px)
     return mask, resid
 
 
