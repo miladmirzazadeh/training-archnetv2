@@ -82,26 +82,39 @@ def convert_one(cfg: dict, rich: dict, W: int, H: int, line_frac: float,
             if poly and len(poly) >= 3:
                 d.polygon([tuple(p) for p in to_px(A, poly)], fill=ROOM)
 
-    for w in cfg.get("walls", []):                        # walls over rooms
+    walls = cfg.get("walls", [])
+    for w in walls:                                       # walls over rooms
         poly = w.get("polygon")
         if poly and len(poly) >= 3:
             d.polygon([tuple(p) for p in to_px(A, poly)], fill=WALL)
 
-    # openings over walls — draw the symbol stroke (leaf / glazing) thick,
-    # not the loose bbox (a door bbox includes empty swing area).
-    for o in rich.get("openings", []):
-        cls = DOOR if o.get("type") == "door" else WINDOW
-        if cls == DOOR and o.get("hinge_point_px") and o.get("leaf_end_px"):
-            a, b = o["hinge_point_px"], o["leaf_end_px"]
-        elif cls == WINDOW and o.get("p1_px") and o.get("p2_px"):
-            a, b = o["p1_px"], o["p2_px"]
-        else:
-            bb = o.get("bbox_px")
-            if not bb:
+    # px-per-mm from the affine's linear part (for wall-thickness in px)
+    ppm = float(np.hypot(A[0, 0], A[1, 0]))
+
+    def nearest_wall_thickness_mm(center):
+        best, bt = 1e18, 150.0
+        for w in walls:
+            cl = w.get("centerline")
+            if not cl:
                 continue
-            a, b = (bb[0], bb[1]), (bb[2], bb[3])
-        length = ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
-        width = max(4, int(line_frac * length))
+            mid = ((cl[0][0] + cl[-1][0]) / 2, (cl[0][1] + cl[-1][1]) / 2)
+            dd = (mid[0] - center[0]) ** 2 + (mid[1] - center[1]) ** 2
+            if dd < best:
+                best, bt = dd, float(w.get("thickness_mm", 150.0))
+        return bt
+
+    # Openings over walls — draw the OPENING FOOTPRINT (the p1..p2 span along
+    # the wall, thickened to the host wall thickness). This sits inside the wall
+    # gap (tight + accurate), not the swung leaf.
+    for o in cfg.get("openings", []):
+        cat = (o.get("category") or o.get("type") or "").lower()
+        cls = WINDOW if "window" in cat else DOOR
+        p1, p2 = o.get("p1"), o.get("p2")
+        if not (p1 and p2):
+            continue
+        a, b = to_px(A, [p1, p2])
+        thick_mm = nearest_wall_thickness_mm(o.get("center", p1))
+        width = max(3, int(round(thick_mm * ppm)))
         d.line([tuple(a), tuple(b)], fill=cls, width=width)
     return mask, resid
 
