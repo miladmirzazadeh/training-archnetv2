@@ -16,7 +16,7 @@ Subcommands:
   convert --dxf-dir DIR --out OUT --split train|test [--layer-map map.json] [--limit N]
 """
 from __future__ import annotations
-import argparse, collections, json, math, sys
+import argparse, collections, json, math, random, sys
 from pathlib import Path
 
 import ezdxf
@@ -153,10 +153,11 @@ def probe(dxf_dir, sample):
           "(or pass --layer-map a JSON {layer: class}).")
 
 
-def convert(dxf_dir, out, split, layer_map, limit):
+def convert(dxf_dir, out, split, layer_map, limit, clutter_mult, clutter_min):
     if layer_map:
         global LAYER2CLASS
         LAYER2CLASS = {k.lower(): v for k, v in json.loads(Path(layer_map).read_text()).items()}
+    rng = random.Random(0)
     files = sorted(Path(dxf_dir).rglob("*.dxf"))
     if limit: files = files[:limit]
     out_dir = Path(out) / split; out_dir.mkdir(parents=True, exist_ok=True)
@@ -164,9 +165,18 @@ def convert(dxf_dir, out, split, layer_map, limit):
     for fp in files:
         W, H, prims = primitives_of(str(fp))
         if not prims: continue
-        rec = [{"t": t, "feat": f, "sem": lab, "ins": -1, "g": g} for (t, f, lab, g) in prims]
+        # Subsample clutter: wall hatching explodes into thousands of tiny lines.
+        # Keep all wall/door/window/column; cap clutter so it can't drown them.
+        noncl = [p for p in prims if p[2] != 0]
+        cl = [p for p in prims if p[2] == 0]
+        cap = max(clutter_min, int(clutter_mult * len(noncl)))
+        if len(cl) > cap:
+            cl = rng.sample(cl, cap)
+        keep = noncl + cl; rng.shuffle(keep)
+        rec = [{"feat": f, "sem": lab} for (_t, f, lab, _g) in keep]   # minimal: train needs only these
         for r in rec: hist[r["sem"]] += 1
-        (out_dir / f"{fp.stem}.json").write_text(json.dumps({"width": W, "height": H, "primitives": rec}))
+        (out_dir / f"{fp.stem}.json").write_text(json.dumps(
+            {"width": round(W, 2), "height": round(H, 2), "primitives": rec}))
         n_plans += 1; n_prim += len(rec)
     print(f"[{split}] wrote {n_plans} plans, {n_prim} primitives -> {out_dir}")
     print("  class histogram:", {CLASS_NAMES[k]: v for k, v in sorted(hist.items())})
@@ -182,9 +192,11 @@ def main():
     p = sub.add_parser("probe");   p.add_argument("--dxf-dir", required=True); p.add_argument("--sample", type=int, default=6)
     c = sub.add_parser("convert"); c.add_argument("--dxf-dir", required=True); c.add_argument("--out", required=True)
     c.add_argument("--split", default="train"); c.add_argument("--layer-map"); c.add_argument("--limit", type=int)
+    c.add_argument("--clutter-mult", type=float, default=2.0, help="keep <= mult x (#wall+door+window+col) clutter per plan")
+    c.add_argument("--clutter-min", type=int, default=80, help="…but at least this many clutter per plan")
     a = ap.parse_args()
     if a.cmd == "probe": probe(a.dxf_dir, a.sample)
-    else: convert(a.dxf_dir, a.out, a.split, a.layer_map, a.limit)
+    else: convert(a.dxf_dir, a.out, a.split, a.layer_map, a.limit, a.clutter_mult, a.clutter_min)
 
 
 if __name__ == "__main__":

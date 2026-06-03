@@ -1,48 +1,48 @@
-"""Generate DXFs from scenario configs (NO PNG) — runs on RunPod.
+"""Generate DXFs from Vitruev scenario batches (NO PNG) — local or RunPod.
 
-This drives YOUR generator. Confirm the two integration points marked TODO
-against your repo (the import path of FloorPlan, and how a config is loaded).
-Everything downstream (parse_dxf) only needs the DXFs this writes.
+Mirrors render_dataset.py exactly:  load_scenarios(render_batches/) -> engine
+config dicts -> FloorPlan(cfg) -> write_dxf().  (The raw plan_*.json files are a
+different, higher-level schema and are NOT valid FloorPlan input — load_scenarios
+is the required converter.)
 """
 from __future__ import annotations
-import argparse, json, sys
+import argparse, sys
 from pathlib import Path
 
-# Vitruev_synthdata: FloorPlan takes the plan config dict, then .write_dxf(path).
-from generator.layout import FloorPlan          # plan = FloorPlan(cfg); plan.write_dxf(path)
-
-
-def load_config(p: Path):
-    cfg = json.loads(p.read_text())
-    cfg.setdefault("plan_id", p.stem)           # stable id/seed (config uses "id")
-    return cfg
+from generator.scenario_loader import load_scenarios     # scenario schema -> engine config
+from generator.layout import FloorPlan
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--configs", required=True, type=Path, help="dir of plan_*.json scenario configs")
+    ap.add_argument("--configs", type=Path, help="configs root (contains render_batches/)")
+    ap.add_argument("--batches", type=Path, help="render_batches dir directly (overrides --configs)")
     ap.add_argument("--out", required=True, type=Path, help="output dir for .dxf")
     ap.add_argument("--limit", type=int)
     a = ap.parse_args()
-    a.out.mkdir(parents=True, exist_ok=True)
 
-    cfgs = sorted(a.configs.glob("plan_*.json"))
+    batch_dir = a.batches or (a.configs / "render_batches" if a.configs else None)
+    if not batch_dir or not Path(batch_dir).is_dir():
+        print("ERROR: pass --batches <render_batches dir> or --configs <root with render_batches/>",
+              file=sys.stderr); sys.exit(2)
+
+    a.out.mkdir(parents=True, exist_ok=True)
+    configs, warns = load_scenarios(str(batch_dir))
+    print(f"loaded {len(configs)} configs ({len(warns)} conversion warnings)")
     if a.limit:
-        cfgs = cfgs[:a.limit]
-    if not cfgs:
-        print(f"ERROR: no plan_*.json under {a.configs}", file=sys.stderr); sys.exit(2)
+        configs = configs[:a.limit]
 
     ok = 0
-    for cp in cfgs:
+    for i, cfg in enumerate(configs):
+        pid = cfg.get("plan_id") or cfg.get("id") or f"plan_{i:05d}"
         try:
-            plan = FloorPlan(load_config(cp))
-            plan.write_dxf(str(a.out / f"{cp.stem}.dxf"))
+            FloorPlan(cfg).write_dxf(str(a.out / f"{pid}.dxf"))
             ok += 1
-        except Exception as e:                   # one bad config shouldn't kill the run
-            print("skip", cp.name, repr(e), file=sys.stderr)
-        if ok % 500 == 0 and ok:
+        except Exception as e:
+            print("skip", pid, repr(e), file=sys.stderr)
+        if ok and ok % 500 == 0:
             print(f"  …{ok} DXFs")
-    print(f"wrote {ok}/{len(cfgs)} DXFs -> {a.out}")
+    print(f"wrote {ok}/{len(configs)} DXFs -> {a.out}")
     if ok == 0:
         sys.exit(3)
 
