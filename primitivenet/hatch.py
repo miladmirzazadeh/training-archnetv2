@@ -1,11 +1,14 @@
 """Universal hatch detection for DXF — run on EVERY dxf (synthetic prep & real
 inference) so the transformer sees the same hatch-free primitives both times.
 
-Detects hatch three ways and unifies them into labeled regions (the "mask with
-labels"), while exposing the entity handles to strip from the primitive set:
-  1. native  — `HATCH` entities (boundary + pattern; structural, exact)
-  2. layer    — lines on known hatch layers (optional hint, e.g. ["A-WALL-PATT"])
-  3. geometric— exploded hatch: dense clusters of short, parallel segments
+Detection runs HINTS-FIRST, then geometry, unifying everything into labeled
+regions (the "mask with labels") + the entity handles to strip. Each later
+stage only considers primitives not already claimed by an earlier one:
+  1. native   — `HATCH` entities (boundary + pattern; lines OR solid fill)
+  2. solid    — filled areas: SOLID / TRACE (gray highlight blocks)
+  3. layer    — primitives on known hatch layers (hint, e.g. ["A-WALL-PATT"])
+  4. geometric— exploded line hatch: dense clusters of short parallel lines
+  5. dots     — stipple hatch: dense clusters of POINTs / tiny circles
 
     hd = HatchDetector("plan.dxf", hatch_layers=["A-WALL-PATT"])
     hd.regions            # list[HatchRegion]  (vector polygons + pattern + layer)
@@ -45,7 +48,8 @@ class HatchRegion:
 
 class HatchDetector:
     def __init__(self, dxf, *, hatch_layers=None, short_frac=0.03, cell_frac=0.006,
-                 min_density=3, min_cells=4, min_lines_per_cell=2.0, parallel_frac=0.0):
+                 min_density=3, min_cells=4, min_lines_per_cell=2.0, dot_max_r_frac=0.004,
+                 parallel_frac=0.0):
         self.doc = dxf if hasattr(dxf, "modelspace") else ezdxf.readfile(str(dxf))
         self.msp = self.doc.modelspace()
         self.hatch_layers = {l.lower() for l in (hatch_layers or [])}
@@ -60,6 +64,7 @@ class HatchDetector:
         self.cell = max(1e-6, cell_frac * self.diag)
         self.min_density = min_density; self.min_cells = min_cells
         self.min_lines_per_cell = min_lines_per_cell; self.parallel_frac = parallel_frac
+        self.dot_max_r = dot_max_r_frac * self.diag
         self.regions: List[HatchRegion] = []
         self.hatch_handles = set()
         self._detect()
@@ -90,14 +95,68 @@ class HatchDetector:
 
     # ----------------------------- detection ------------------------------ #
     def _detect(self):
-        self._native()
-        layer_segs, geom_segs = [], []
+        self._native()                       # 1. CAD-declared hatch (HATCH)
+        self._solids()                       # 2. filled areas (SOLID/TRACE)
+        layer_segs, geom_segs = [], []        # 3+4. remaining line work, split by layer hint
         for (p1, p2, hh, layer) in self._candidate_segments():
             if hh in self.hatch_handles:
                 continue
             (layer_segs if layer.lower() in self.hatch_layers else geom_segs).append((p1, p2, hh))
         self._cluster(layer_segs, "layer", require_density=False)
+        geom_segs = [s for s in geom_segs if s[2] not in self.hatch_handles]   # geometry on what's left
         self._cluster(geom_segs, "geometric", require_density=True)
+        self._dots()                         # 5. stipple/dot hatch (unclaimed)
+
+    def _solids(self):
+        for e in self.msp:
+            if e.dxf.handle in self.hatch_handles or e.dxftype() not in ("SOLID", "TRACE"):
+                continue
+            try:
+                d = e.dxf
+                quad = [(d.vtx0[0], d.vtx0[1]), (d.vtx1[0], d.vtx1[1]),
+                        (d.vtx3[0], d.vtx3[1]), (d.vtx2[0], d.vtx2[1])]    # bowtie -> quad
+            except Exception:
+                continue
+            poly = [p for j, p in enumerate(quad) if p not in quad[:j]]    # dedup triangles
+            if len(poly) >= 3:
+                self.regions.append(HatchRegion(poly, "SOLID", e.dxf.layer, "solid", [e.dxf.handle]))
+                self.hatch_handles.add(e.dxf.handle)
+
+    def _dots(self):
+        items = []
+        for e in self.msp:
+            if e.dxf.handle in self.hatch_handles:
+                continue
+            t = e.dxftype()
+            if t == "POINT":
+                loc = e.dxf.location; items.append(((loc[0], loc[1]), e.dxf.handle))
+            elif t == "CIRCLE" and e.dxf.radius <= self.dot_max_r:
+                c = e.dxf.center; items.append(((c.x, c.y), e.dxf.handle))
+        if len(items) < self.min_density:
+            return
+        nx = max(1, int(self.W / self.cell)); ny = max(1, int(self.H / self.cell))
+        count = np.zeros((ny, nx), np.int32); cell_pts = {}
+        for (x, y), hh in items:
+            cx = min(nx - 1, max(0, int((x - self.x0) / self.cell)))
+            cy = min(ny - 1, max(0, int((y - self.y0) / self.cell)))
+            count[cy, cx] += 1; cell_pts.setdefault((cy, cx), []).append(hh)
+        # dots may be spaced wider than a cell -> cluster occupied cells, not per-cell density
+        occ = ndi.binary_closing(count >= 1, np.ones((3, 3)))
+        lbl, n = ndi.label(occ)
+        for i in range(1, n + 1):
+            comp = lbl == i
+            if int(comp.sum()) < self.min_cells:
+                continue
+            handles = []
+            for cy, cx in zip(*np.where(comp)):
+                handles += cell_pts.get((int(cy), int(cx)), [])
+            handles = list(dict.fromkeys(handles))
+            if len(handles) < max(self.min_density, 6):     # need a real dot cluster, not stray markers
+                continue
+            poly = self._contour_poly(comp)
+            if len(poly) >= 3:
+                self.regions.append(HatchRegion(poly, "DOTS", self._mode_layer(handles), "dots", handles))
+                self.hatch_handles.update(handles)
 
     def _native(self):
         for h in self.msp.query("HATCH"):
