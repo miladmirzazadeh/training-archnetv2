@@ -91,8 +91,22 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42,            # matches render_dataset
                     help="split/no-hatch seed (use 42 to match render_dataset exactly)")
     ap.add_argument("--limit", type=int)
+    ap.add_argument("--shard", type=int, default=0, help="this shard index (0-based)")
+    ap.add_argument("--num-shards", type=int, default=1, help="run N parallel notebooks, each a shard")
     ap.add_argument("--workers", type=int, default=0, help="0 = all CPU cores")
+    ap.add_argument("--solid-hatch", action="store_true",
+                    help="draw wall hatch as ONE solid HATCH entity instead of ~13k lines "
+                         "(~6x faster gen; HatchDetector still emits a hatch region token)")
     a = ap.parse_args()
+
+    if a.solid_hatch:                              # monkeypatch BEFORE the fork so workers inherit it
+        from generator import style, layout
+        def _fast_fills(self):
+            if self.clutter.get("hatch_walls") is False:
+                return style.PLAIN_FILL, style.PLAIN_FILL
+            return style.SOLID_FILL, style.SOLID_FILL
+        layout.FloorPlan._wall_fills = _fast_fills
+        print("solid-hatch ON: hatched walls -> one HATCH entity (fast)")
 
     batch_dir = a.batches or (a.configs / "render_batches" if a.configs else None)
     if not batch_dir or not Path(batch_dir).is_dir():
@@ -102,6 +116,9 @@ def main() -> None:
     print(f"loaded {len(configs)} configs ({len(warns)} conversion warnings)")
     if a.limit:
         configs = configs[:a.limit]
+    if a.num_shards > 1:                           # split across parallel notebooks
+        configs = configs[a.shard::a.num_shards]
+        print(f"shard {a.shard}/{a.num_shards}: {len(configs)} plans")
 
     (a.out / "train").mkdir(parents=True, exist_ok=True)
     (a.out / "val").mkdir(parents=True, exist_ok=True)
