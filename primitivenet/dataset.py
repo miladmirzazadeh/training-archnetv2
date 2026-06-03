@@ -29,21 +29,21 @@ class PrimitiveDataset(Dataset):
             prims = [prims[j] for j in idx]
         feat = torch.tensor([p["feat"] for p in prims], dtype=torch.float32)
         sem = torch.tensor([p["sem"] for p in prims], dtype=torch.long)
-        return feat, sem
+        sub = torch.tensor([p.get("sub", 0) for p in prims], dtype=torch.long)
+        return feat, sem, sub
 
 
 def collate(batch):
-    """Pad a batch of variable-length primitive sets. Returns
-    feats [B,N,F], labels [B,N] (pad=IGNORE), key_padding_mask [B,N] (True=pad)."""
+    """Pad a batch. Returns feats [B,N,F], sem [B,N], sub [B,N] (pad=IGNORE),
+    key_padding_mask [B,N] (True=pad)."""
     B = len(batch)
-    N = max(f.shape[0] for f, _ in batch)
-    F = batch[0][0].shape[1]                 # feature dim inferred from data (12 SVG / 17 DXF)
+    N = max(f.shape[0] for f, _, _ in batch)
+    F = batch[0][0].shape[1]                 # feature dim inferred from data (DXF=18)
     feats = torch.zeros(B, N, F)
-    labels = torch.full((B, N), IGNORE, dtype=torch.long)
+    sem = torch.full((B, N), IGNORE, dtype=torch.long)
+    sub = torch.full((B, N), IGNORE, dtype=torch.long)
     mask = torch.ones(B, N, dtype=torch.bool)  # True where padded
-    for b, (f, s) in enumerate(batch):
+    for b, (f, s, su) in enumerate(batch):
         n = f.shape[0]
-        feats[b, :n] = f
-        labels[b, :n] = s
-        mask[b, :n] = False
-    return feats, labels, mask
+        feats[b, :n] = f; sem[b, :n] = s; sub[b, :n] = su; mask[b, :n] = False
+    return feats, sem, sub, mask

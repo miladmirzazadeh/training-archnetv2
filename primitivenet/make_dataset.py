@@ -16,22 +16,55 @@ Saves three things (all kept on disk for Kaggle datasets):
       --out prim_ds --keep-dxf dxf --scenarios scenarios [--no-hatch-frac 0.1] [--limit N]
 """
 from __future__ import annotations
-import argparse, atexit, collections, hashlib, json, os, random, sys, tempfile
+import argparse, atexit, collections, hashlib, json, math, os, random, sys, tempfile
 import multiprocessing as mp
 from pathlib import Path
 
 from generator.scenario_loader import load_scenarios
 from generator.layout import FloorPlan
-from primitivenet.parse_dxf import primitives_of, CLASS_NAMES
+from primitivenet.parse_dxf import primitives_synth, CLASS_NAMES
+
+
+def _inject_flaws(doc, rng, wall_frac, dup_frac, wall_layers=("A-WALL-FULL", "A-WALL-INTR")):
+    """DXF-only flaws (labels stay correct): ~wall_frac of wall lines get a gap/overshoot
+    (still labeled wall), ~dup_frac get a near-coincident duplicate (labeled 'duplicate'
+    so the agent's overkill can delete it). Returns the duplicate handles."""
+    msp = doc.modelspace(); wl = set(wall_layers); dup = set()
+    walls = [e for e in msp if getattr(e.dxf, "layer", "") in wl and e.dxftype() in ("LINE", "LWPOLYLINE")]
+    for e in walls:
+        if rng.random() < wall_frac:                       # detach / overshoot an endpoint
+            try:
+                if e.dxftype() == "LINE":
+                    a, b = e.dxf.start, e.dxf.end
+                    L = math.hypot(b.x - a.x, b.y - a.y) or 1.0
+                    d = rng.uniform(30, 150) * (1 if rng.random() < 0.5 else -1)
+                    e.dxf.end = (b.x + (b.x - a.x) / L * d, b.y + (b.y - a.y) / L * d, 0)
+                else:
+                    pts = e.get_points()
+                    if len(pts) >= 2:
+                        i = rng.randrange(len(pts)); v = list(pts[i])
+                        v[0] += rng.uniform(-120, 120); v[1] += rng.uniform(-120, 120)
+                        pts[i] = tuple(v); e.set_points(pts)
+            except Exception:
+                pass
+        if rng.random() < dup_frac:                        # overkill: near-coincident duplicate
+            try:
+                c = e.copy()
+                try: c.translate(rng.uniform(-15, 15), rng.uniform(-15, 15), 0)
+                except Exception: pass
+                msp.add_entity(c); dup.add(c.dxf.handle)
+            except Exception:
+                pass
+    return dup
 
 _G: dict = {}
 
 
-def _init(out, keep_dxf, scenarios, hatch_layers, no_hatch_frac, val_frac, seed):
+def _init(out, keep_dxf, scenarios, no_hatch_frac, val_frac, seed, flaw_frac, dup_frac):
     _G.update(out=Path(out), keep=(Path(keep_dxf) if keep_dxf else None),
               scen=(Path(scenarios) if scenarios else None),
-              hl=list(hatch_layers) if hatch_layers else None,
-              nhf=no_hatch_frac, vf=val_frac, seed=seed)
+              nhf=no_hatch_frac, vf=val_frac, seed=seed,
+              fw=flaw_frac, fd=dup_frac)
     if _G["keep"] is None:
         fd, tmp = tempfile.mkstemp(suffix=".dxf"); os.close(fd)
         _G["tmp"] = tmp
@@ -51,25 +84,30 @@ def _no_hatch_for(pid, seed, frac):               # matches render_dataset.no_ha
 def _work(cfg):
     pid = cfg.get("plan_id") or cfg.get("id") or "plan"
     no_hatch = _no_hatch_for(pid, _G["seed"], _G["nhf"])
-    if no_hatch:                                   # match render_dataset: clutter.hatch_walls=False
-        cfg = dict(cfg); cfg["clutter"] = {**cfg.get("clutter", {}), "hatch_walls": False}
+    # ALWAYS render hatch-free (fast). The hatch is added as a LABEL token instead,
+    # except for the no-hatch 10% which get no hatch token at all.
+    cfg = dict(cfg); cfg["clutter"] = {**cfg.get("clutter", {}), "hatch_walls": False}
     dxf = str(_G["keep"] / f"{pid}.dxf") if _G["keep"] else _G["tmp"]
+    rng = random.Random(pid)
     try:
-        FloorPlan(cfg).write_dxf(dxf)
-        W, H, prims, regions = primitives_of(dxf, hatch_layers=_G["hl"])
+        plan = FloorPlan(cfg)
+        sub_map = {str(c.id): getattr(c, "subtype", None) for c in getattr(plan, "opening_components", [])}
+        doc = plan.write_dxf(dxf)
+        dup_handles = _inject_flaws(doc, rng, _G["fw"], _G["fd"])    # flaws live ONLY in the DXF
+        doc.saveas(dxf)
+        W, H, prims = primitives_synth(dxf, dup_handles, add_hatch=not no_hatch, sub_map=sub_map)
     except Exception as e:
         return (pid, None, repr(e), no_hatch)
     if not prims:
         return (pid, None, "empty", no_hatch)
-    rng = random.Random(pid); keep = list(prims); rng.shuffle(keep)
-    rec = [{"feat": f, "sem": lab} for (_t, f, lab, _g) in keep]
+    keep = list(prims); rng.shuffle(keep)
+    rec = [{"feat": f, "sem": c, "sub": s} for (_t, f, c, s, _g) in keep]
     split = _split_for(pid, _G["seed"], _G["vf"])
     (_G["out"] / split / f"{pid}.json").write_text(json.dumps(
-        {"width": round(W, 2), "height": round(H, 2), "no_hatch": no_hatch,
-         "primitives": rec, "hatch_regions": [r.to_dict() for r in regions]}))
+        {"width": round(W, 2), "height": round(H, 2), "no_hatch": no_hatch, "primitives": rec}))
     if _G["scen"]:
         try:
-            (_G["scen"] / f"{pid}.json").write_text(json.dumps(cfg))
+            (_G["scen"] / f"{pid}.json").write_text(json.dumps(cfg))   # clean scenario (no flaws)
         except Exception:
             pass
     return (pid, collections.Counter(r["sem"] for r in rec), None, no_hatch)
@@ -80,12 +118,14 @@ def main() -> None:
     ap.add_argument("--configs", type=Path, help="configs root (contains render_batches/)")
     ap.add_argument("--batches", type=Path, help="render_batches dir directly")
     ap.add_argument("--out", required=True, type=Path)
-    ap.add_argument("--keep-dxf", type=Path, help="write+KEEP each DXF here")
-    ap.add_argument("--scenarios", type=Path, help="write the engine config (scenario) here")
-    ap.add_argument("--hatch-layers", nargs="+", default=["A-WALL-PATT"],
-                    help="layers HatchDetector treats as hatch (synthetic: A-WALL-PATT)")
+    ap.add_argument("--keep-dxf", type=Path, help="write+KEEP each DXF here (flawed, hatch-free)")
+    ap.add_argument("--scenarios", type=Path, help="write the engine config (clean scenario) here")
     ap.add_argument("--no-hatch-frac", type=float, default=0.1,
-                    help="fraction of plans with NO wall hatch (matches render_dataset)")
+                    help="fraction of plans with NO hatch label (the rest get a hatch region token)")
+    ap.add_argument("--flaw-frac", type=float, default=0.05,
+                    help="fraction of wall lines given a gap/overshoot in the DXF (label stays wall)")
+    ap.add_argument("--dup-frac", type=float, default=0.05,
+                    help="fraction of wall lines given a duplicate in the DXF (labeled 'duplicate')")
     ap.add_argument("--val-frac", type=float, default=0.15,    # matches render_dataset
                     help="val fraction (deterministic MD5 split, matches render_dataset)")
     ap.add_argument("--seed", type=int, default=42,            # matches render_dataset
@@ -94,19 +134,7 @@ def main() -> None:
     ap.add_argument("--shard", type=int, default=0, help="this shard index (0-based)")
     ap.add_argument("--num-shards", type=int, default=1, help="run N parallel notebooks, each a shard")
     ap.add_argument("--workers", type=int, default=0, help="0 = all CPU cores")
-    ap.add_argument("--solid-hatch", action="store_true",
-                    help="draw wall hatch as ONE solid HATCH entity instead of ~13k lines "
-                         "(~6x faster gen; HatchDetector still emits a hatch region token)")
     a = ap.parse_args()
-
-    if a.solid_hatch:                              # monkeypatch BEFORE the fork so workers inherit it
-        from generator import style, layout
-        def _fast_fills(self):
-            if self.clutter.get("hatch_walls") is False:
-                return style.PLAIN_FILL, style.PLAIN_FILL
-            return style.SOLID_FILL, style.SOLID_FILL
-        layout.FloorPlan._wall_fills = _fast_fills
-        print("solid-hatch ON: hatched walls -> one HATCH entity (fast)")
 
     batch_dir = a.batches or (a.configs / "render_batches" if a.configs else None)
     if not batch_dir or not Path(batch_dir).is_dir():
@@ -128,11 +156,12 @@ def main() -> None:
 
     workers = a.workers or os.cpu_count() or 1
     print(f"generating {len(configs)} plans with {workers} workers "
-          f"(no-hatch {a.no_hatch_frac:.0%}, hatch_layers={a.hatch_layers})…")
+          f"(hatch-free DXF; no-hatch-label {a.no_hatch_frac:.0%}; "
+          f"flaws {a.flaw_frac:.0%}, dups {a.dup_frac:.0%})…")
     hist: dict = {}; n_ok = n_skip = n_nohatch = 0
     init_args = (str(a.out), str(a.keep_dxf) if a.keep_dxf else None,
-                 str(a.scenarios) if a.scenarios else None, a.hatch_layers,
-                 a.no_hatch_frac, a.val_frac, a.seed)
+                 str(a.scenarios) if a.scenarios else None,
+                 a.no_hatch_frac, a.val_frac, a.seed, a.flaw_frac, a.dup_frac)
     with mp.Pool(workers, initializer=_init, initargs=init_args, maxtasksperchild=200) as pool:
         for i, (pid, cnt, err, nh) in enumerate(pool.imap_unordered(_work, configs, chunksize=8), 1):
             if cnt is None:

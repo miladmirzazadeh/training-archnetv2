@@ -27,8 +27,16 @@ def split_for(pid, seed=42, val_frac=0.15):      # matches render_dataset.split_
 import ezdxf
 from ezdxf import bbox
 
-CLASS_NAMES = ["clutter", "wall", "door", "window", "column", "hatch"]
+CLASS_NAMES = ["clutter", "wall", "door", "window", "column", "hatch", "duplicate"]
 NAME2ID = {n: i for i, n in enumerate(CLASS_NAMES)}
+
+# 2nd head: subtype. Predicted independently of the coarse class, so a wrong
+# subtype still leaves the object correctly a 'door'. No materials.
+SUBTYPE_NAMES = ["none", "interior", "exterior",
+                 "single", "double", "sliding", "pocket", "bifold", "french", "garage",
+                 "casement", "fixed", "bay", "bow", "awning", "louvre", "clerestory", "corner"]
+SUB2ID = {n: i for i, n in enumerate(SUBTYPE_NAMES)}
+NUM_SUBTYPES = len(SUBTYPE_NAMES)
 
 # Vitruev_synthdata layer scheme (generator/style.py). Block references for
 # doors/windows/columns are placed on the component layer, so the INSERT's layer
@@ -59,6 +67,30 @@ def _label(layer: str, block: str | None) -> int:
     return NAME2ID.get(LAYER2CLASS.get((layer or "").lower(), DEFAULT_CLASS), 0)
 
 
+def _entity_label(e, dup_handles=frozenset(), sub_map=None):
+    """(coarse, subtype) for one top-level entity.
+    - duplicates -> (duplicate, none)
+    - walls -> (wall, interior/exterior by layer)
+    - doors/windows (INSERT) -> (door/window, subtype from sub_map[OPN_<id>])
+    sub_map is None at inference (no scenario) -> opening subtype = none (model predicts)."""
+    if getattr(e.dxf, "handle", None) in dup_handles:
+        return NAME2ID["duplicate"], 0
+    layer = getattr(e.dxf, "layer", "0")
+    if e.dxftype() == "INSERT":
+        coarse = _label(layer, e.dxf.name)
+        sub = 0
+        if sub_map and coarse in (NAME2ID["door"], NAME2ID["window"]):
+            oid = str(e.dxf.name).split("_", 1)[-1]          # OPN_D5 -> D5
+            sub = SUB2ID.get(str(sub_map.get(oid, "")).lower(), 0)
+        return coarse, sub
+    coarse = _label(layer, None)
+    sub = 0
+    if coarse == NAME2ID["wall"]:
+        u = layer.upper()
+        sub = SUB2ID["exterior"] if u == "A-WALL-FULL" else (SUB2ID["interior"] if u == "A-WALL-INTR" else 0)
+    return coarse, sub
+
+
 def feature(kind, x0, y0, x1, y1, cx, cy, length, ang, radius, sweep, bw, bh, W, H):
     diag = math.hypot(W, H) or 1.0
     oh = [0.0] * NUM_TYPES; oh[_TYPES.get(kind, 3)] = 1.0
@@ -78,9 +110,8 @@ def _emit(kind, p0, p1, center, length, ang, radius, sweep, W, H, x0o, y0o):
     return [round(f, 5) for f in feat], g
 
 
-def _region_emit(region, W, H, x0o, y0o):
-    """A hatch region -> one 'region' token (type=region, label=hatch)."""
-    pts = region.boundary
+def _region_emit(pts, W, H, x0o, y0o):
+    """A polygon -> one 'region' token (type=region). Used for hatch regions."""
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
     minx, miny, maxx, maxy = min(xs), min(ys), max(xs), max(ys)
     cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
@@ -91,39 +122,37 @@ def _region_emit(region, W, H, x0o, y0o):
     return [round(f, 5) for f in feat], g
 
 
-def _walk(entity, forced_label, prims, W, H, x0o, y0o, depth=0):
-    """Append primitives for one DXF entity (recursing INSERT blocks)."""
+def _walk(entity, forced, prims, W, H, x0o, y0o, depth=0):
+    """Append primitives for one entity as (t, feat, coarse, sub, geom). forced=
+    (coarse, sub) is applied to the entity and recursed into INSERT children."""
     t = entity.dxftype()
-    layer = getattr(entity.dxf, "layer", "0")
     if t == "INSERT" and depth < 4:
-        block = entity.dxf.name
-        lab = _label(layer, block)
         try:
             for ve in entity.virtual_entities():
-                _walk(ve, lab, prims, W, H, x0o, y0o, depth + 1)
+                _walk(ve, forced, prims, W, H, x0o, y0o, depth + 1)
         except Exception:
             pass
         return
-    lab = forced_label if forced_label is not None else _label(layer, None)
+    coarse, sub = forced
     try:
         if t == "LINE":
             a, b = entity.dxf.start, entity.dxf.end
             length = math.hypot(b.x - a.x, b.y - a.y); ang = math.atan2(b.y - a.y, b.x - a.x)
             f, g = _emit("line", (a.x, a.y), (b.x, b.y), ((a.x + b.x) / 2, (a.y + b.y) / 2),
                          length, ang, 0.0, 0.0, W, H, x0o, y0o)
-            prims.append((0, f, lab, g))
+            prims.append((0, f, coarse, sub, g))
         elif t == "ARC":
             a, b = entity.start_point, entity.end_point
             c = entity.dxf.center; r = entity.dxf.radius
             sweep = math.radians((entity.dxf.end_angle - entity.dxf.start_angle) % 360)
             ang = math.atan2(b.y - a.y, b.x - a.x)
             f, g = _emit("arc", (a.x, a.y), (b.x, b.y), (c.x, c.y), r * sweep, ang, r, sweep, W, H, x0o, y0o)
-            prims.append((1, f, lab, g))
+            prims.append((1, f, coarse, sub, g))
         elif t in ("CIRCLE", "ELLIPSE"):
             c = entity.dxf.center; r = getattr(entity.dxf, "radius", 0.0) or 1.0
             f, g = _emit("circle", (c.x - r, c.y), (c.x + r, c.y), (c.x, c.y),
                          2 * math.pi * r, 0.0, r, 2 * math.pi, W, H, x0o, y0o)
-            prims.append((2, f, lab, g))
+            prims.append((2, f, coarse, sub, g))
         elif t in ("LWPOLYLINE", "POLYLINE"):
             pts = [(p[0], p[1]) for p in entity.get_points()] if t == "LWPOLYLINE" \
                   else [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
@@ -135,7 +164,7 @@ def _walk(entity, forced_label, prims, W, H, x0o, y0o, depth=0):
                 ang = math.atan2(b[1] - a[1], b[0] - a[0])
                 f, g = _emit("line", a, b, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2),
                              length, ang, 0.0, 0.0, W, H, x0o, y0o)
-                prims.append((0, f, lab, g))
+                prims.append((0, f, coarse, sub, g))
     except Exception:
         pass
 
@@ -154,11 +183,37 @@ def primitives_of(dxf_path, hatch_layers=None):
         return 0, 0, [], []
     prims = []
     for e in hd.clean_entities():            # hatch already removed
-        _walk(e, None, prims, W, H, x0o, y0o)
+        _walk(e, _entity_label(e), prims, W, H, x0o, y0o)   # sub_map=None at inference
     for r in hd.regions:                     # hatch -> region tokens
-        f, g = _region_emit(r, W, H, x0o, y0o)
-        prims.append((4, f, NAME2ID["hatch"], g))
+        f, g = _region_emit(r.boundary, W, H, x0o, y0o)
+        prims.append((4, f, NAME2ID["hatch"], 0, g))
     return W, H, prims, hd.regions
+
+
+def primitives_synth(dxf_path, dup_handles=frozenset(), add_hatch=True, sub_map=None,
+                     wall_layers=("A-WALL-FULL", "A-WALL-INTR")):
+    """Fast synthetic extraction (hatch-free DXF, no HatchDetector). Labels coarse+sub
+    by layer / scenario, forces 'duplicate' for injected dup handles, and (if add_hatch)
+    adds one 'hatch' region token per wall polygon (binary 'hatch present')."""
+    doc = ezdxf.readfile(dxf_path); msp = doc.modelspace()
+    ext = bbox.extents(msp)
+    if ext is None or not ext.has_data:
+        return 0, 0, []
+    x0o, y0o = ext.extmin.x, ext.extmin.y
+    W = max(1e-6, ext.extmax.x - x0o); H = max(1e-6, ext.extmax.y - y0o)
+    prims = []
+    for e in msp:
+        _walk(e, _entity_label(e, dup_handles, sub_map), prims, W, H, x0o, y0o)
+    if add_hatch:
+        wl = {l.upper() for l in wall_layers}
+        for e in msp:
+            if (e.dxftype() == "LWPOLYLINE" and e.dxf.handle not in dup_handles
+                    and getattr(e.dxf, "layer", "").upper() in wl):
+                poly = [(p[0], p[1]) for p in e.get_points()]
+                if len(poly) >= 3:
+                    f, g = _region_emit(poly, W, H, x0o, y0o)
+                    prims.append((4, f, NAME2ID["hatch"], 0, g))
+    return W, H, prims
 
 
 def probe(dxf_dir, sample):
@@ -193,7 +248,7 @@ def convert(dxf_dir, out, layer_map, limit, hatch_layers=("A-WALL-PATT",), seed=
     for fp in files:
         W, H, prims, regions = primitives_of(str(fp), hatch_layers=list(hatch_layers))
         if not prims: continue
-        rec = [{"feat": f, "sem": lab} for (_t, f, lab, _g) in prims]
+        rec = [{"feat": f, "sem": c, "sub": s} for (_t, f, c, s, _g) in prims]
         for r in rec: hist[r["sem"]] += 1
         split = split_for(fp.stem, seed, val_frac)
         (Path(out) / split / f"{fp.stem}.json").write_text(json.dumps(

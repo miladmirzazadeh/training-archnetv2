@@ -27,25 +27,30 @@ from primitivenet.model import PrimitiveNet
 def evaluate(model, loader, device, num_classes):
     model.eval()
     inter = np.zeros(num_classes); union = np.zeros(num_classes)
-    correct = total = 0
-    for feats, labels, mask in loader:
-        feats, labels, mask = feats.to(device), labels.to(device), mask.to(device)
-        pred = model(feats, key_padding_mask=mask).argmax(-1)
-        valid = labels != IGNORE
-        p = pred[valid].cpu().numpy(); g = labels[valid].cpu().numpy()
+    correct = total = sub_correct = sub_total = 0
+    for feats, sem, sub, mask in loader:
+        feats, sem, sub, mask = feats.to(device), sem.to(device), sub.to(device), mask.to(device)
+        lc, ls = model(feats, key_padding_mask=mask)
+        pred, spred = lc.argmax(-1), ls.argmax(-1)
+        valid = sem != IGNORE
+        p = pred[valid].cpu().numpy(); g = sem[valid].cpu().numpy()
         correct += (p == g).sum(); total += g.size
         for c in range(num_classes):
             pc, gc = p == c, g == c
             inter[c] += (pc & gc).sum(); union[c] += (pc | gc).sum()
-    iou = inter / np.maximum(union, 1)
-    present = union > 0
-    return (correct / max(total, 1)), float(iou[present].mean() if present.any() else 0.0)
+        sv = (sub != IGNORE) & (sub > 0)           # subtype acc only where a real subtype exists
+        sub_correct += (spred[sv] == sub[sv]).sum().item(); sub_total += int(sv.sum().item())
+    iou = inter / np.maximum(union, 1); present = union > 0
+    return (correct / max(total, 1)), float(iou[present].mean() if present.any() else 0.0), \
+           (sub_correct / max(sub_total, 1))
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, type=Path)
-    ap.add_argument("--num-classes", type=int, default=6)   # clutter/wall/door/window/column/hatch
+    ap.add_argument("--num-classes", type=int, default=7)   # clutter/wall/door/window/column/hatch/duplicate
+    ap.add_argument("--num-subtypes", type=int, default=18) # parse_dxf.SUBTYPE_NAMES
+    ap.add_argument("--sub-weight", type=float, default=0.5, help="loss weight for the subtype head")
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -77,13 +82,15 @@ def main() -> None:
 
     feat_dim = int(tr.dataset[0][0].shape[1])               # infer from data (DXF schema = 18)
     print("feat_dim:", feat_dim)
-    model = PrimitiveNet(num_classes=args.num_classes, feat_dim=feat_dim, dim=args.dim, depth=args.depth).to(device)
+    model = PrimitiveNet(num_classes=args.num_classes, num_subtypes=args.num_subtypes,
+                         feat_dim=feat_dim, dim=args.dim, depth=args.depth).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     w = torch.ones(args.num_classes, device=device); w[0] = args.bg_weight
     for c in (2, 3):                              # door, window — boost the hard classes
         if c < args.num_classes: w[c] = args.open_weight
     crit = nn.CrossEntropyLoss(weight=w, ignore_index=IGNORE)
+    crit_sub = nn.CrossEntropyLoss(ignore_index=IGNORE)
 
     start, best = 0, 0.0
     if last_pt.exists():
@@ -96,19 +103,20 @@ def main() -> None:
     t0 = time.time()
     for epoch in range(start, args.epochs):
         model.train(); run = 0.0
-        for feats, labels, mask in tr:
-            feats, labels, mask = feats.to(device), labels.to(device), mask.to(device)
+        for feats, sem, sub, mask in tr:
+            feats, sem, sub, mask = feats.to(device), sem.to(device), sub.to(device), mask.to(device)
             opt.zero_grad()
-            logits = model(feats, key_padding_mask=mask)
-            loss = crit(logits.reshape(-1, args.num_classes), labels.reshape(-1))
+            lc, ls = model(feats, key_padding_mask=mask)
+            loss = crit(lc.reshape(-1, args.num_classes), sem.reshape(-1)) \
+                + args.sub_weight * crit_sub(ls.reshape(-1, args.num_subtypes), sub.reshape(-1))
             loss.backward(); opt.step(); run += loss.item()
         sched.step()
-        acc, miou = evaluate(model, va, device, args.num_classes)
+        acc, miou, sub_acc = evaluate(model, va, device, args.num_classes)
         print(f"epoch {epoch+1}/{args.epochs} loss {run/len(tr):.4f} "
-              f"val_acc {acc:.4f} val_mIoU {miou:.4f} ({(time.time()-t0)/60:.1f}m)")
+              f"val_acc {acc:.4f} val_mIoU {miou:.4f} sub_acc {sub_acc:.4f} ({(time.time()-t0)/60:.1f}m)")
         ck = {"model": model.state_dict(), "opt": opt.state_dict(),
               "sched": sched.state_dict(), "epoch": epoch, "best": best,
-              "args": vars(args)}
+              "args": {**vars(args), "feat_dim": feat_dim}}
         torch.save(ck, last_pt)
         if miou > best:
             best = miou; ck["best"] = best; torch.save(ck, best_pt)

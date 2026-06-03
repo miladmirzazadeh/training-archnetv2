@@ -15,7 +15,7 @@ import torch.nn as nn
 
 
 class PrimitiveNet(nn.Module):
-    def __init__(self, num_classes: int = 6, feat_dim: int = 18, dim: int = 256,
+    def __init__(self, num_classes: int = 7, num_subtypes: int = 18, feat_dim: int = 18, dim: int = 256,
                  depth: int = 4, heads: int = 8, dim_ff: int = 512, dropout: float = 0.1):
         super().__init__()
         self.feat_dim = feat_dim
@@ -25,10 +25,11 @@ class PrimitiveNet(nn.Module):
             d_model=dim, nhead=heads, dim_feedforward=dim_ff,
             dropout=dropout, batch_first=True, activation="gelu", norm_first=True)
         self.encoder = nn.TransformerEncoder(layer, num_layers=depth)
-        self.head = nn.Linear(dim, num_classes)
+        self.head = nn.Linear(dim, num_classes)          # coarse: wall/door/window/...
+        self.head_sub = nn.Linear(dim, num_subtypes)     # subtype: single/double/interior/...
 
     def forward(self, feats, key_padding_mask=None):
         # feats: [B,N,FEAT_DIM]; key_padding_mask: [B,N] True where padded
         x = self.embed(feats)
         x = self.encoder(x, src_key_padding_mask=key_padding_mask)
-        return self.head(x)  # [B,N,num_classes]
+        return self.head(x), self.head_sub(x)            # ([B,N,C], [B,N,S])
