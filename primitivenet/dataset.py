@@ -8,8 +8,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from primitivenet.parse_svg import FEAT_DIM
-
 IGNORE = -100  # CE ignore index for padded tokens
 
 
@@ -39,7 +37,8 @@ def collate(batch):
     feats [B,N,F], labels [B,N] (pad=IGNORE), key_padding_mask [B,N] (True=pad)."""
     B = len(batch)
     N = max(f.shape[0] for f, _ in batch)
-    feats = torch.zeros(B, N, FEAT_DIM)
+    F = batch[0][0].shape[1]                 # feature dim inferred from data (12 SVG / 17 DXF)
+    feats = torch.zeros(B, N, F)
     labels = torch.full((B, N), IGNORE, dtype=torch.long)
     mask = torch.ones(B, N, dtype=torch.bool)  # True where padded
     for b, (f, s) in enumerate(batch):

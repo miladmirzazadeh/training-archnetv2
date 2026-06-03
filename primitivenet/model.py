@@ -13,15 +13,14 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from primitivenet.parse_svg import FEAT_DIM
-
 
 class PrimitiveNet(nn.Module):
-    def __init__(self, num_classes: int = 36, dim: int = 256, depth: int = 4,
-                 heads: int = 8, dim_ff: int = 512, dropout: float = 0.1):
+    def __init__(self, num_classes: int = 5, feat_dim: int = 17, dim: int = 256,
+                 depth: int = 4, heads: int = 8, dim_ff: int = 512, dropout: float = 0.1):
         super().__init__()
+        self.feat_dim = feat_dim
         self.embed = nn.Sequential(
-            nn.Linear(FEAT_DIM, dim), nn.GELU(), nn.LayerNorm(dim))
+            nn.Linear(feat_dim, dim), nn.GELU(), nn.LayerNorm(dim))
         layer = nn.TransformerEncoderLayer(
             d_model=dim, nhead=heads, dim_feedforward=dim_ff,
             dropout=dropout, batch_first=True, activation="gelu", norm_first=True)

@@ -53,8 +53,11 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=4)
     ap.add_argument("--max-prims", type=int, default=4096)
     ap.add_argument("--bg-weight", type=float, default=0.1,
-                    help="Loss weight for the background class (id 0); other "
-                         "classes weight 1. Down-weights the dominant bg.")
+                    help="Loss weight for the background/clutter class (id 0). "
+                         "Down-weights the dominant bg.")
+    ap.add_argument("--open-weight", type=float, default=2.0,
+                    help="Loss weight for door(2)+window(3) — the small, hard "
+                         "classes. >1 boosts opening precision/recall.")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--time-budget", type=float, default=2.5, help="Max hours.")
     ap.add_argument("--out", type=Path, default=Path("runs/primitivenet"))
@@ -72,10 +75,12 @@ def main() -> None:
                     batch_size=args.batch, shuffle=False, num_workers=args.workers,
                     collate_fn=collate, pin_memory=True)
 
-    model = PrimitiveNet(args.num_classes, args.dim, args.depth).to(device)
+    model = PrimitiveNet(num_classes=args.num_classes, dim=args.dim, depth=args.depth).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     w = torch.ones(args.num_classes, device=device); w[0] = args.bg_weight
+    for c in (2, 3):                              # door, window — boost the hard classes
+        if c < args.num_classes: w[c] = args.open_weight
     crit = nn.CrossEntropyLoss(weight=w, ignore_index=IGNORE)
 
     start, best = 0, 0.0
