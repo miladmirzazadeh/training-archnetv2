@@ -32,8 +32,8 @@ echo "== 2. clone generator + this repo =="
 [ -d "$W/gen" ] || git clone "$GEN_REPO" "$W/gen"
 pip install -q -e "$W/gen" 2>/dev/null || pip install -q -r "$W/gen/requirements.txt" 2>/dev/null || true
 # this primitivenet package (so -m primitivenet.* works):
-[ -d "$W/floorplan-openings-detector" ] || \
-  git clone https://github.com/miladmirzazadeh/floorplan-openings-detector.git "$W/fod" || true
+[ -d "$W/fod/primitivenet" ] || \
+  git clone https://github.com/miladmirzazadeh/training-archnetv2.git "$W/fod" || true
 PKG_ROOT="$W/fod"; [ -d "$PKG_ROOT/primitivenet" ] || PKG_ROOT="$(pwd)"
 
 echo "== 3. generate DXFs (configs -> DXF, on the pod) =="
