@@ -27,31 +27,32 @@ from primitivenet.parse_dxf import primitives_of, CLASS_NAMES
 _G: dict = {}
 
 
-def _init(out, keep_dxf, scenarios, hatch_layers, no_hatch_frac, val_frac):
+def _init(out, keep_dxf, scenarios, hatch_layers, no_hatch_frac, val_frac, seed):
     _G.update(out=Path(out), keep=(Path(keep_dxf) if keep_dxf else None),
               scen=(Path(scenarios) if scenarios else None),
               hl=list(hatch_layers) if hatch_layers else None,
-              nhf=no_hatch_frac, vf=val_frac)
+              nhf=no_hatch_frac, vf=val_frac, seed=seed)
     if _G["keep"] is None:
         fd, tmp = tempfile.mkstemp(suffix=".dxf"); os.close(fd)
         _G["tmp"] = tmp
         atexit.register(lambda: os.path.exists(tmp) and os.remove(tmp))
 
 
-def _seed(pid, salt=""):
-    return int(hashlib.md5((salt + pid).encode()).hexdigest(), 16)
+def _split_for(pid, seed, val_frac):              # matches render_dataset.split_for
+    h = int(hashlib.md5(f"{seed}:{pid}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return "val" if h < val_frac else "train"
+
+
+def _no_hatch_for(pid, seed, frac):               # matches render_dataset.no_hatch_for
+    h = int(hashlib.md5(f"nohatch:{seed}:{pid}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return h < frac
 
 
 def _work(cfg):
     pid = cfg.get("plan_id") or cfg.get("id") or "plan"
-    no_hatch = (_seed(pid, "nohatch") % 1000) < int(_G["nhf"] * 1000)
-    if no_hatch:                                   # disable wall hatching in the scenario
-        cfg.setdefault("clutter", {})
-        if isinstance(cfg["clutter"], dict):
-            cfg["clutter"]["hatch_walls"] = False
-        for w in cfg.get("walls", []):
-            if isinstance(w, dict):
-                w["hatch"] = None
+    no_hatch = _no_hatch_for(pid, _G["seed"], _G["nhf"])
+    if no_hatch:                                   # match render_dataset: clutter.hatch_walls=False
+        cfg = dict(cfg); cfg["clutter"] = {**cfg.get("clutter", {}), "hatch_walls": False}
     dxf = str(_G["keep"] / f"{pid}.dxf") if _G["keep"] else _G["tmp"]
     try:
         FloorPlan(cfg).write_dxf(dxf)
@@ -62,7 +63,7 @@ def _work(cfg):
         return (pid, None, "empty", no_hatch)
     rng = random.Random(pid); keep = list(prims); rng.shuffle(keep)
     rec = [{"feat": f, "sem": lab} for (_t, f, lab, _g) in keep]
-    split = "val" if _seed(pid) % 100 < _G["vf"] * 100 else "train"
+    split = _split_for(pid, _G["seed"], _G["vf"])
     (_G["out"] / split / f"{pid}.json").write_text(json.dumps(
         {"width": round(W, 2), "height": round(H, 2), "no_hatch": no_hatch,
          "primitives": rec, "hatch_regions": [r.to_dict() for r in regions]}))
@@ -84,8 +85,11 @@ def main() -> None:
     ap.add_argument("--hatch-layers", nargs="+", default=["A-WALL-PATT"],
                     help="layers HatchDetector treats as hatch (synthetic: A-WALL-PATT)")
     ap.add_argument("--no-hatch-frac", type=float, default=0.1,
-                    help="fraction of plans generated with NO wall hatch")
-    ap.add_argument("--val-frac", type=float, default=0.1)
+                    help="fraction of plans with NO wall hatch (matches render_dataset)")
+    ap.add_argument("--val-frac", type=float, default=0.15,    # matches render_dataset
+                    help="val fraction (deterministic MD5 split, matches render_dataset)")
+    ap.add_argument("--seed", type=int, default=42,            # matches render_dataset
+                    help="split/no-hatch seed (use 42 to match render_dataset exactly)")
     ap.add_argument("--limit", type=int)
     ap.add_argument("--workers", type=int, default=0, help="0 = all CPU cores")
     a = ap.parse_args()
@@ -110,8 +114,9 @@ def main() -> None:
           f"(no-hatch {a.no_hatch_frac:.0%}, hatch_layers={a.hatch_layers})…")
     hist: dict = {}; n_ok = n_skip = n_nohatch = 0
     init_args = (str(a.out), str(a.keep_dxf) if a.keep_dxf else None,
-                 str(a.scenarios) if a.scenarios else None, a.hatch_layers, a.no_hatch_frac, a.val_frac)
-    with mp.Pool(workers, initializer=_init, initargs=init_args) as pool:
+                 str(a.scenarios) if a.scenarios else None, a.hatch_layers,
+                 a.no_hatch_frac, a.val_frac, a.seed)
+    with mp.Pool(workers, initializer=_init, initargs=init_args, maxtasksperchild=200) as pool:
         for i, (pid, cnt, err, nh) in enumerate(pool.imap_unordered(_work, configs, chunksize=8), 1):
             if cnt is None:
                 n_skip += 1

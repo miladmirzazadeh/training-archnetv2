@@ -16,8 +16,13 @@ Subcommands:
   convert --dxf-dir DIR --out OUT --split train|test [--layer-map map.json] [--limit N]
 """
 from __future__ import annotations
-import argparse, collections, json, math, random, sys
+import argparse, collections, hashlib, json, math, random, sys
 from pathlib import Path
+
+
+def split_for(pid, seed=42, val_frac=0.15):      # matches render_dataset.split_for
+    h = int(hashlib.md5(f"{seed}:{pid}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    return "val" if h < val_frac else "train"
 
 import ezdxf
 from ezdxf import bbox
@@ -174,20 +179,24 @@ def probe(dxf_dir, sample):
           "(or pass --layer-map a JSON {layer: class}).")
 
 
-def convert(dxf_dir, out, split, layer_map, limit, hatch_layers=("A-WALL-PATT",)):
+def convert(dxf_dir, out, layer_map, limit, hatch_layers=("A-WALL-PATT",), seed=42, val_frac=0.15):
+    """Convert a dir of DXFs (e.g. render_dataset's dataset_10k/dxf/) -> primitive
+    JSON, auto-split train/val per plan to match render_dataset.split_for."""
     if layer_map:
         global LAYER2CLASS
         LAYER2CLASS = {k.lower(): v for k, v in json.loads(Path(layer_map).read_text()).items()}
     files = sorted(Path(dxf_dir).rglob("*.dxf"))
     if limit: files = files[:limit]
-    out_dir = Path(out) / split; out_dir.mkdir(parents=True, exist_ok=True)
+    (Path(out) / "train").mkdir(parents=True, exist_ok=True)
+    (Path(out) / "val").mkdir(parents=True, exist_ok=True)
     n_plans = n_prim = 0; hist = collections.Counter()
     for fp in files:
         W, H, prims, regions = primitives_of(str(fp), hatch_layers=list(hatch_layers))
         if not prims: continue
         rec = [{"feat": f, "sem": lab} for (_t, f, lab, _g) in prims]
         for r in rec: hist[r["sem"]] += 1
-        (out_dir / f"{fp.stem}.json").write_text(json.dumps(
+        split = split_for(fp.stem, seed, val_frac)
+        (Path(out) / split / f"{fp.stem}.json").write_text(json.dumps(
             {"width": round(W, 2), "height": round(H, 2), "primitives": rec,
              "hatch_regions": [r.to_dict() for r in regions]}))
         n_plans += 1; n_prim += len(rec)
@@ -204,11 +213,12 @@ def main():
     ap = argparse.ArgumentParser(); sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("probe");   p.add_argument("--dxf-dir", required=True); p.add_argument("--sample", type=int, default=6)
     c = sub.add_parser("convert"); c.add_argument("--dxf-dir", required=True); c.add_argument("--out", required=True)
-    c.add_argument("--split", default="train"); c.add_argument("--layer-map"); c.add_argument("--limit", type=int)
+    c.add_argument("--layer-map"); c.add_argument("--limit", type=int)
     c.add_argument("--hatch-layers", nargs="+", default=["A-WALL-PATT"])
+    c.add_argument("--seed", type=int, default=42); c.add_argument("--val-frac", type=float, default=0.15)
     a = ap.parse_args()
     if a.cmd == "probe": probe(a.dxf_dir, a.sample)
-    else: convert(a.dxf_dir, a.out, a.split, a.layer_map, a.limit, a.hatch_layers)
+    else: convert(a.dxf_dir, a.out, a.layer_map, a.limit, a.hatch_layers, a.seed, a.val_frac)
 
 
 if __name__ == "__main__":
