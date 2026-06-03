@@ -45,7 +45,7 @@ def evaluate(model, loader, device, num_classes):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", required=True, type=Path)
-    ap.add_argument("--num-classes", type=int, default=36)
+    ap.add_argument("--num-classes", type=int, default=6)   # clutter/wall/door/window/column/hatch
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=3e-4)
@@ -75,7 +75,9 @@ def main() -> None:
                     batch_size=args.batch, shuffle=False, num_workers=args.workers,
                     collate_fn=collate, pin_memory=True)
 
-    model = PrimitiveNet(num_classes=args.num_classes, dim=args.dim, depth=args.depth).to(device)
+    feat_dim = int(tr.dataset[0][0].shape[1])               # infer from data (DXF schema = 18)
+    print("feat_dim:", feat_dim)
+    model = PrimitiveNet(num_classes=args.num_classes, feat_dim=feat_dim, dim=args.dim, depth=args.depth).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     w = torch.ones(args.num_classes, device=device); w[0] = args.bg_weight

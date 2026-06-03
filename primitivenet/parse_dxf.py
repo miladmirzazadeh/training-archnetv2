@@ -22,7 +22,7 @@ from pathlib import Path
 import ezdxf
 from ezdxf import bbox
 
-CLASS_NAMES = ["clutter", "wall", "door", "window", "column"]
+CLASS_NAMES = ["clutter", "wall", "door", "window", "column", "hatch"]
 NAME2ID = {n: i for i, n in enumerate(CLASS_NAMES)}
 
 # Vitruev_synthdata layer scheme (generator/style.py). Block references for
@@ -41,8 +41,9 @@ BLOCK_RULES = {}             # INSERT layer already distinguishes door/window/co
 # Anything unmatched -> clutter (0): dropped at output, and the model learns to ignore it.
 DEFAULT_CLASS = "clutter"
 
-FEAT_DIM = 17     # one-hot type(4) + [x0,y0,x1,y1,cx,cy,len,sin,cos,rad,sweep,bw,bh]
-_TYPES = {"line": 0, "arc": 1, "circle": 2, "other": 3}
+_TYPES = {"line": 0, "arc": 1, "circle": 2, "other": 3, "region": 4}
+NUM_TYPES = 5
+FEAT_DIM = NUM_TYPES + 13   # one-hot type(5) + [x0,y0,x1,y1,cx,cy,len,sin,cos,rad,sweep,bw,bh]
 
 
 def _label(layer: str, block: str | None) -> int:
@@ -55,7 +56,7 @@ def _label(layer: str, block: str | None) -> int:
 
 def feature(kind, x0, y0, x1, y1, cx, cy, length, ang, radius, sweep, bw, bh, W, H):
     diag = math.hypot(W, H) or 1.0
-    oh = [0.0] * 4; oh[_TYPES.get(kind, 3)] = 1.0
+    oh = [0.0] * NUM_TYPES; oh[_TYPES.get(kind, 3)] = 1.0
     return oh + [x0 / W, y0 / H, x1 / W, y1 / H, cx / W, cy / H,
                  length / diag, math.sin(ang), math.cos(ang),
                  radius / diag, sweep / math.pi, bw / W, bh / H]
@@ -69,6 +70,19 @@ def _emit(kind, p0, p1, center, length, ang, radius, sweep, W, H, x0o, y0o):
     bw, bh = abs(x1 - x0), abs(y1 - y0)
     feat = feature(kind, x0, y0, x1, y1, cx, cy, length, ang, radius, sweep, bw, bh, W, H)
     g = [round(v, 3) for v in (p0[0], p0[1], p1[0], p1[1], center[0], center[1], radius, sweep)]
+    return [round(f, 5) for f in feat], g
+
+
+def _region_emit(region, W, H, x0o, y0o):
+    """A hatch region -> one 'region' token (type=region, label=hatch)."""
+    pts = region.boundary
+    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+    minx, miny, maxx, maxy = min(xs), min(ys), max(xs), max(ys)
+    cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+    perim = sum(math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]) for i in range(len(pts)))
+    feat = feature("region", minx - x0o, miny - y0o, maxx - x0o, maxy - y0o,
+                   cx - x0o, cy - y0o, perim, 0.0, 0.0, 0.0, maxx - minx, maxy - miny, W, H)
+    g = [round(v, 2) for p in pts for v in p]   # full polygon for reconstruction
     return [round(f, 5) for f in feat], g
 
 
@@ -121,18 +135,25 @@ def _walk(entity, forced_label, prims, W, H, x0o, y0o, depth=0):
         pass
 
 
-def primitives_of(dxf_path: str):
-    """Return (W, H, list[(t,feat,label,geom)]) for one DXF."""
-    doc = ezdxf.readfile(dxf_path); msp = doc.modelspace()
-    ext = bbox.extents(msp)
-    if ext is None or not ext.has_data:
-        return 0, 0, []
-    x0o, y0o = ext.extmin.x, ext.extmin.y
-    W = max(1e-6, ext.extmax.x - x0o); H = max(1e-6, ext.extmax.y - y0o)
+def primitives_of(dxf_path, hatch_layers=None):
+    """Return (W, H, prims, regions). HatchDetector strips raw hatch and emits each
+    hatch as ONE 'region' token (label='hatch'); the rest are labeled by layer.
+    prims: list[(t, feat, label, geom)]; regions: list[HatchRegion]."""
+    from primitivenet.hatch import HatchDetector
+    try:
+        hd = HatchDetector(dxf_path, hatch_layers=hatch_layers)
+    except Exception:
+        return 0, 0, [], []
+    W, H, x0o, y0o = hd.W, hd.H, hd.x0, hd.y0
+    if W <= 1e-6 or H <= 1e-6:
+        return 0, 0, [], []
     prims = []
-    for e in msp:
+    for e in hd.clean_entities():            # hatch already removed
         _walk(e, None, prims, W, H, x0o, y0o)
-    return W, H, prims
+    for r in hd.regions:                     # hatch -> region tokens
+        f, g = _region_emit(r, W, H, x0o, y0o)
+        prims.append((4, f, NAME2ID["hatch"], g))
+    return W, H, prims, hd.regions
 
 
 def probe(dxf_dir, sample):
@@ -153,30 +174,22 @@ def probe(dxf_dir, sample):
           "(or pass --layer-map a JSON {layer: class}).")
 
 
-def convert(dxf_dir, out, split, layer_map, limit, clutter_mult, clutter_min):
+def convert(dxf_dir, out, split, layer_map, limit, hatch_layers=("A-WALL-PATT",)):
     if layer_map:
         global LAYER2CLASS
         LAYER2CLASS = {k.lower(): v for k, v in json.loads(Path(layer_map).read_text()).items()}
-    rng = random.Random(0)
     files = sorted(Path(dxf_dir).rglob("*.dxf"))
     if limit: files = files[:limit]
     out_dir = Path(out) / split; out_dir.mkdir(parents=True, exist_ok=True)
     n_plans = n_prim = 0; hist = collections.Counter()
     for fp in files:
-        W, H, prims = primitives_of(str(fp))
+        W, H, prims, regions = primitives_of(str(fp), hatch_layers=list(hatch_layers))
         if not prims: continue
-        # Subsample clutter: wall hatching explodes into thousands of tiny lines.
-        # Keep all wall/door/window/column; cap clutter so it can't drown them.
-        noncl = [p for p in prims if p[2] != 0]
-        cl = [p for p in prims if p[2] == 0]
-        cap = max(clutter_min, int(clutter_mult * len(noncl)))
-        if len(cl) > cap:
-            cl = rng.sample(cl, cap)
-        keep = noncl + cl; rng.shuffle(keep)
-        rec = [{"feat": f, "sem": lab} for (_t, f, lab, _g) in keep]   # minimal: train needs only these
+        rec = [{"feat": f, "sem": lab} for (_t, f, lab, _g) in prims]
         for r in rec: hist[r["sem"]] += 1
         (out_dir / f"{fp.stem}.json").write_text(json.dumps(
-            {"width": round(W, 2), "height": round(H, 2), "primitives": rec}))
+            {"width": round(W, 2), "height": round(H, 2), "primitives": rec,
+             "hatch_regions": [r.to_dict() for r in regions]}))
         n_plans += 1; n_prim += len(rec)
     print(f"[{split}] wrote {n_plans} plans, {n_prim} primitives -> {out_dir}")
     print("  class histogram:", {CLASS_NAMES[k]: v for k, v in sorted(hist.items())})
@@ -192,11 +205,10 @@ def main():
     p = sub.add_parser("probe");   p.add_argument("--dxf-dir", required=True); p.add_argument("--sample", type=int, default=6)
     c = sub.add_parser("convert"); c.add_argument("--dxf-dir", required=True); c.add_argument("--out", required=True)
     c.add_argument("--split", default="train"); c.add_argument("--layer-map"); c.add_argument("--limit", type=int)
-    c.add_argument("--clutter-mult", type=float, default=2.0, help="keep <= mult x (#wall+door+window+col) clutter per plan")
-    c.add_argument("--clutter-min", type=int, default=80, help="…but at least this many clutter per plan")
+    c.add_argument("--hatch-layers", nargs="+", default=["A-WALL-PATT"])
     a = ap.parse_args()
     if a.cmd == "probe": probe(a.dxf_dir, a.sample)
-    else: convert(a.dxf_dir, a.out, a.split, a.layer_map, a.limit, a.clutter_mult, a.clutter_min)
+    else: convert(a.dxf_dir, a.out, a.split, a.layer_map, a.limit, a.hatch_layers)
 
 
 if __name__ == "__main__":

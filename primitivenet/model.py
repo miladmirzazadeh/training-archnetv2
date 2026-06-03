@@ -15,7 +15,7 @@ import torch.nn as nn
 
 
 class PrimitiveNet(nn.Module):
-    def __init__(self, num_classes: int = 5, feat_dim: int = 17, dim: int = 256,
+    def __init__(self, num_classes: int = 6, feat_dim: int = 18, dim: int = 256,
                  depth: int = 4, heads: int = 8, dim_ff: int = 512, dropout: float = 0.1):
         super().__init__()
         self.feat_dim = feat_dim
