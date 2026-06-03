@@ -40,12 +40,16 @@ def _work(cfg):
     if not prims:
         return (pid, None, "empty")
     rng = random.Random(pid)                       # deterministic per plan
-    noncl = [p for p in prims if p[2] != 0]
-    cl = [p for p in prims if p[2] == 0]
-    cap = max(_G["cmin"], int(_G["cm"] * len(noncl)))
-    if len(cl) > cap:
-        cl = rng.sample(cl, cap)
-    keep = noncl + cl; rng.shuffle(keep)
+    if _G["cm"] > 0:                               # optional clutter cap (default OFF)
+        noncl = [p for p in prims if p[2] != 0]
+        cl = [p for p in prims if p[2] == 0]
+        cap = max(_G["cmin"], int(_G["cm"] * len(noncl)))
+        if len(cl) > cap:
+            cl = rng.sample(cl, cap)
+        keep = noncl + cl
+    else:
+        keep = list(prims)                         # keep ALL primitives (train/infer consistency)
+    rng.shuffle(keep)
     rec = [{"feat": f, "sem": lab} for (_t, f, lab, _g) in keep]
     split = "val" if int(hashlib.md5(pid.encode()).hexdigest(), 16) % 100 < _G["vf"] * 100 else "train"
     (_G["out"] / split / f"{pid}.json").write_text(json.dumps(
@@ -60,7 +64,9 @@ def main() -> None:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--limit", type=int)
     ap.add_argument("--val-frac", type=float, default=0.1)
-    ap.add_argument("--clutter-mult", type=float, default=2.0)
+    ap.add_argument("--clutter-mult", type=float, default=0.0,
+                    help="0 = keep ALL primitives (default; matches hatch-heavy inference). "
+                         ">0 caps clutter to mult x non-clutter per plan.")
     ap.add_argument("--clutter-min", type=int, default=80)
     ap.add_argument("--keep-dxf", type=Path, help="write+KEEP each DXF here")
     ap.add_argument("--workers", type=int, default=0, help="0 = all CPU cores")
