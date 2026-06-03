@@ -26,6 +26,8 @@ def main() -> None:
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--clutter-mult", type=float, default=2.0)
     ap.add_argument("--clutter-min", type=int, default=80)
+    ap.add_argument("--keep-dxf", type=Path, help="if set, write+KEEP each DXF here "
+                    "(else a single temp file is reused and deleted)")
     a = ap.parse_args()
 
     batch_dir = a.batches or (a.configs / "render_batches" if a.configs else None)
@@ -41,13 +43,17 @@ def main() -> None:
     (a.out / "train").mkdir(parents=True, exist_ok=True)
     (a.out / "val").mkdir(parents=True, exist_ok=True)
     hist: dict = {}; n_ok = n_prim = 0
+    keep_dir = a.keep_dxf
+    if keep_dir:
+        keep_dir.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(suffix=".dxf"); os.close(fd)
     try:
         for i, cfg in enumerate(configs):
             pid = cfg.get("plan_id") or cfg.get("id") or f"plan_{i:05d}"
+            dxf_path = str(keep_dir / f"{pid}.dxf") if keep_dir else tmp
             try:
-                FloorPlan(cfg).write_dxf(tmp)
-                W, H, prims = primitives_of(tmp)
+                FloorPlan(cfg).write_dxf(dxf_path)
+                W, H, prims = primitives_of(dxf_path)
             except Exception as e:
                 print("skip", pid, repr(e), file=sys.stderr); continue
             if not prims:
